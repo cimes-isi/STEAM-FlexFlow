@@ -537,6 +537,7 @@ double Simulator::simulate_runtime(const FFModel* model,
   task_manager->reset();
   if (l1optimizer)
     l1optimizer->reset();
+  machine->reset();
   // Step 1: register forward and backward tasks
   for (size_t l = 0; l < model->layers.size(); l++) {
     Op* op = model->layers[l];
@@ -868,6 +869,7 @@ double LogicalTaskgraphBasedSimulator::simulate_runtime(
   task_manager->reset();
   if (l1optimizer)
     l1optimizer->reset();
+  machine->reset();
   std::unordered_map<SimTask*, Op*> task_to_op;
   // Step 1: register forward and backward tasks
   for (size_t l = 0; l < model->layers.size(); l++) {
@@ -1647,6 +1649,7 @@ double SpMulMatSimulator::simulate_runtime(
   task_manager->reset();
   if (l1optimizer)
     l1optimizer->reset();
+  machine->reset();
   
   std::unordered_map<SimTask*, Op*> task_to_op;
 

@@ -10,6 +10,7 @@
 
 #include "isi_parallel.h"
 #define COUNT_USAGE 
+#define ISI_OPTIMIZE_MEM
 
 /// @param[in] nb_elements : size of your for loop
 /// @param[in] functor(start, end) :
@@ -156,7 +157,7 @@ double SimpleMachineModel::get_inter_node_gpu_bandwidth() const
 }
 
 
-std::vector<CommDevice *> SimpleMachineModel::get_comm_path(MemDevice *src_mem, MemDevice *tar_mem) const
+std::vector<CommDevice *> SimpleMachineModel::get_comm_path(MemDevice *src_mem, MemDevice *tar_mem)
 {
     std::vector<CommDevice *> ret;
     // on the same memory
@@ -756,7 +757,7 @@ void EnhancedMachineModel::add_comm_path(std::vector<CommDevice::CommDevType> co
   }
 }
 
-std::vector<CommDevice *> EnhancedMachineModel::get_comm_path(MemDevice *src_mem, MemDevice *tar_mem) const
+std::vector<CommDevice *> EnhancedMachineModel::get_comm_path(MemDevice *src_mem, MemDevice *tar_mem)
 {
   std::vector<CommDevice *> ret;
   if (src_mem->device_id == tar_mem->device_id) {
@@ -938,6 +939,16 @@ NetworkedMachineModel::~NetworkedMachineModel()
   delete routing_strategy;
 }
 
+void NetworkedMachineModel::reset()
+{
+#ifdef ISI_OPTIMIZE_MEM
+  for (auto it : ids_to_nw_nominal_device) {
+    delete it.second;
+  }
+  ids_to_nw_nominal_device.clear();
+#endif // ISI_OPTIMIZE_MEM
+}
+
 int NetworkedMachineModel::get_version() const
 {
   return version;
@@ -947,6 +958,23 @@ int NetworkedMachineModel::get_version() const
 int dk_g_route[1024*1024];
 int dk_g_route_src[1024];
 #endif
+
+NominalCommDevice* NetworkedMachineModel::nomm_comm_devs_get(int node_id_src, int node_id_tar)
+{
+  NominalCommDevice* ncd = nullptr;
+  int total_devs = num_nodes + num_switches;
+  size_t device_id = node_id_src * total_devs + node_id_tar;
+  if (ids_to_nw_nominal_device.find(device_id) == ids_to_nw_nominal_device.end()) {
+    std::string link_name = "NOMINAL " + std::to_string(node_id_src) + "-" + std::to_string(node_id_tar);
+    ncd = new NominalCommDevice(link_name, device_id, total_devs, routing_strategy);
+    ncd->reset();
+    ncd->set_physical_paths(routing_strategy->get_routes(node_id_src, node_id_tar));
+    ids_to_nw_nominal_device[device_id] = ncd;
+  } else {
+    ncd = ids_to_nw_nominal_device.at(device_id);
+  }
+  return ncd;
+}
 
 void NetworkedMachineModel::update_route() {
   // nominal network links
@@ -973,38 +1001,38 @@ void NetworkedMachineModel::update_route() {
 #endif
   for (int i = 0; i < num_nodes; i++) {
     for (int j = 0; j < num_nodes; j++) {
-      int device_id = i * total_devs + j;
-      std::string link_name = "NOMINAL " + std::to_string(i) + "-" + std::to_string(j);
+#ifdef ISI_OPTIMIZE_MEM
+      size_t device_id = i * total_devs + j;
       if (ids_to_nw_nominal_device.find(device_id) == ids_to_nw_nominal_device.end()) {
-        ids_to_nw_nominal_device[device_id] = new NominalCommDevice(link_name, device_id, total_devs, routing_strategy);
+        continue;
       }
-      ids_to_nw_nominal_device[device_id]->reset();
-      // ids_to_nw_nominal_device[device_id]->set_physical_paths(routing_strategy->get_routes(i, j));
+#endif // ISI_OPTIMIZE_MEM
+      NominalCommDevice* ncd = nomm_comm_devs_get(i, j);
+      ncd->reset();
+#ifdef ISI_PARALLEL
+      ncd->set_physical_paths(routing_strategy->get_routes(i, j));
+#endif // ISI_PARALLEL
     }
   }
 
   // std::vector<int> indicies(num_nodes);
   // std::iota(ivec.begin(), ivec.end(), 0);
 
-#ifdef ISI_PARALLEL
-  for (int i = 0; i < num_nodes; i++) {
-  fprintf(stderr,"%d: %s: originally par for, nodes(%d/%d)\n", omp_get_thread_num(), __func__, i, num_nodes);
-#else
+#ifndef ISI_PARALLEL
   // for (int i = 0; i < num_nodes; i++) {
   parallel_for(num_nodes, [&](int start, int end){  
     for(int i = start; i < end; i++) {
-#endif
       // std::cerr << "node i " << i << std::endl;
       auto all_routes = routing_strategy->get_routes_from_src(i);
       for (int j = 0; j < num_nodes; j++) {
-        ids_to_nw_nominal_device[i * total_devs + j]->set_physical_paths(all_routes[j]);
+        size_t device_id = i * total_devs + j;
+        if (ids_to_nw_nominal_device.find(device_id) != ids_to_nw_nominal_device.end()) {
+          ids_to_nw_nominal_device[device_id]->set_physical_paths(all_routes[j]);
+        }
       }
-#ifdef ISI_PARALLEL
-    }
-#else
     }
   });
-#endif
+#endif // ISI_PARALLEL
 }
 
 CompDevice* NetworkedMachineModel::get_gpu(int device_id) const
@@ -1051,7 +1079,7 @@ void NetworkedMachineModel::set_routing_strategy(NetworkRoutingStrategy* rs)
 }
 
 std::vector<CommDevice *> 
-NetworkedMachineModel::get_comm_path(MemDevice *src_mem, MemDevice *tar_mem) const
+NetworkedMachineModel::get_comm_path(MemDevice *src_mem, MemDevice *tar_mem)
 {
   /* This implementation very much is an extension of the simple_machine
    * model's version. no details about socket and memories
@@ -1066,14 +1094,13 @@ NetworkedMachineModel::get_comm_path(MemDevice *src_mem, MemDevice *tar_mem) con
       return ret;
     }
     else {
-      int device_id = src_mem->node_id * total_devs + tar_mem->node_id;
 #ifdef COUNT_USAGE
       dk_g_route[src_mem->node_id * 1024 + tar_mem->node_id]++;	// DK debug
 #endif
       if (pipelined)
-        ret.emplace_back(ids_to_nw_nominal_device.at(device_id));
+        ret.emplace_back(nomm_comm_devs_get(src_mem->node_id, tar_mem->node_id));
       else {
-        std::vector<CommDevice*> physical_path = ids_to_nw_nominal_device.at(device_id)->expand_to_physical();
+        std::vector<CommDevice*> physical_path = nomm_comm_devs_get(src_mem->node_id, tar_mem->node_id)->expand_to_physical();
         ret.insert(ret.end(), physical_path.cbegin(), physical_path.cend());
       }
     }
@@ -1091,11 +1118,10 @@ NetworkedMachineModel::get_comm_path(MemDevice *src_mem, MemDevice *tar_mem) con
 #ifdef COUNT_USAGE
       dk_g_route[src_mem->node_id * 1024 + tar_mem->node_id]++;	// DK debug
 #endif
-      int device_id = src_mem->node_id * total_devs + tar_mem->node_id;
       if (pipelined)
-        ret.emplace_back(ids_to_nw_nominal_device.at(device_id));
+        ret.emplace_back(nomm_comm_devs_get(src_mem->node_id, tar_mem->node_id));
       else {
-        std::vector<CommDevice*> physical_path = ids_to_nw_nominal_device.at(device_id)->expand_to_physical();
+        std::vector<CommDevice*> physical_path = nomm_comm_devs_get(src_mem->node_id, tar_mem->node_id)->expand_to_physical();
         ret.insert(ret.end(), physical_path.cbegin(), physical_path.cend());
       }
       if (pcie_on) ret.emplace_back(id_to_dramtogpu_comm_device.at(tar_mem->device_id));
@@ -1106,14 +1132,13 @@ NetworkedMachineModel::get_comm_path(MemDevice *src_mem, MemDevice *tar_mem) con
       if (pcie_on) ret.emplace_back(id_to_dramtogpu_comm_device.at(tar_mem->device_id));
     }
     else {
-      int device_id = src_mem->node_id * total_devs + tar_mem->node_id;
 #ifdef COUNT_USAGE
       dk_g_route[src_mem->node_id * 1024 + tar_mem->node_id]++;	// DK debug
 #endif
       if (pipelined)
-        ret.emplace_back(ids_to_nw_nominal_device.at(device_id));
+        ret.emplace_back(nomm_comm_devs_get(src_mem->node_id, tar_mem->node_id));
       else {
-        std::vector<CommDevice*> physical_path = ids_to_nw_nominal_device.at(device_id)->expand_to_physical();
+        std::vector<CommDevice*> physical_path = nomm_comm_devs_get(src_mem->node_id, tar_mem->node_id)->expand_to_physical();
         ret.insert(ret.end(), physical_path.cbegin(), physical_path.cend());
       }
       if (pcie_on) ret.emplace_back(id_to_dramtogpu_comm_device.at(tar_mem->device_id));
@@ -1125,14 +1150,13 @@ NetworkedMachineModel::get_comm_path(MemDevice *src_mem, MemDevice *tar_mem) con
     }
     else {
       if (pcie_on) ret.emplace_back(id_to_gputodram_comm_device.at(src_mem->device_id));
-      int device_id = src_mem->node_id * total_devs + tar_mem->node_id;
 #ifdef COUNT_USAGE
       dk_g_route[src_mem->node_id * 1024 + tar_mem->node_id]++;	// DK debug
 #endif
       if (pipelined)
-        ret.emplace_back(ids_to_nw_nominal_device.at(device_id));
+        ret.emplace_back(nomm_comm_devs_get(src_mem->node_id, tar_mem->node_id));
       else {
-        std::vector<CommDevice*> physical_path = ids_to_nw_nominal_device.at(device_id)->expand_to_physical();
+        std::vector<CommDevice*> physical_path = nomm_comm_devs_get(src_mem->node_id, tar_mem->node_id)->expand_to_physical();
         ret.insert(ret.end(), physical_path.cbegin(), physical_path.cend());
       }
     }
@@ -1151,16 +1175,17 @@ std::string NetworkedMachineModel::to_string() const
 }
 
 CommDevice * 
-NetworkedMachineModel::get_nominal_path(MemDevice *src_mem, MemDevice *tar_mem) const
+NetworkedMachineModel::get_nominal_path(MemDevice *src_mem, MemDevice *tar_mem)
 {
   if (src_mem->node_id == tar_mem->node_id) {
     return nullptr;
   }
-  int device_id = src_mem->node_id * num_nodes + tar_mem->node_id;
+  // TODO: device_id uses num_nodes here, but nomm_comm_devs_get() assumes it should be num_nodes + num_switches
+  // int device_id = src_mem->node_id * num_nodes + tar_mem->node_id;
 #ifdef COUNT_USAGE
   dk_g_route[src_mem->node_id * 1024 + tar_mem->node_id]++;	// DK debug
 #endif
-  return ids_to_nw_nominal_device.at(device_id);
+  return nomm_comm_devs_get(src_mem->node_id, tar_mem->node_id);
 }
 
 // TODO 

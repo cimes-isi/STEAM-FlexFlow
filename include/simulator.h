@@ -140,6 +140,7 @@ public:
 class MachineModel {
 public:
   virtual ~MachineModel() = default;
+  virtual void reset() {};
   virtual int get_version() const = 0;
   virtual CompDevice *get_gpu(int device_id) const = 0;
   virtual MemDevice *get_gpu_fb_mem(int devicd_id) const = 0;
@@ -150,7 +151,7 @@ public:
   virtual double get_inter_node_gpu_bandwidth() const = 0;
   virtual double get_intra_node_gpu_latency() const = 0;
   virtual double get_inter_node_gpu_latency() const = 0;
-  virtual std::vector<CommDevice *> get_comm_path(MemDevice *src_mem, MemDevice *tar_mem) const = 0;
+  virtual std::vector<CommDevice *> get_comm_path(MemDevice *src_mem, MemDevice *tar_mem) = 0;
   virtual std::string to_string() const = 0;
   int version;
 };
@@ -168,7 +169,7 @@ public:
   double get_inter_node_gpu_bandwidth() const;
   double get_intra_node_gpu_latency() const {return 0;}
   double get_inter_node_gpu_latency() const {return 0;}
-  std::vector<CommDevice *> get_comm_path(MemDevice *src_mem, MemDevice *tar_mem) const;
+  std::vector<CommDevice *> get_comm_path(MemDevice *src_mem, MemDevice *tar_mem);
   std::string to_string() const;
 public:
   int num_nodes;
@@ -222,7 +223,7 @@ public:
     double get_inter_node_gpu_bandwidth() const;
     double get_intra_node_gpu_latency() const {return membus_latency;}
     double get_inter_node_gpu_latency() const {return nic_latency;}
-    std::vector<CommDevice *> get_comm_path(MemDevice *src_mem, MemDevice *tar_mem) const;
+    std::vector<CommDevice *> get_comm_path(MemDevice *src_mem, MemDevice *tar_mem);
     std::string to_string() const;
 public:
     int num_nodes;
@@ -367,6 +368,7 @@ public:
       size_t capacity, 
       double link_bandwidth);
   ~NetworkedMachineModel();
+  void reset();
   int get_version() const;
   CompDevice *get_gpu(int device_id) const;
   MemDevice *get_gpu_fb_mem(int devicd_id) const;
@@ -381,10 +383,10 @@ public:
   double get_intra_node_gpu_latency() const {return 0;}
   double get_inter_node_gpu_latency() const {return network_latency;}
   void set_routing_strategy(NetworkRoutingStrategy* rs);
-  std::vector<CommDevice *> get_comm_path(MemDevice *src_mem, MemDevice *tar_mem) const;
+  std::vector<CommDevice *> get_comm_path(MemDevice *src_mem, MemDevice *tar_mem);
   std::string to_string() const;
   /* return only the nominal device. For recording tg. */
-  CommDevice* get_nominal_path(MemDevice* src_mem, MemDevice *tar_mem) const;
+  CommDevice* get_nominal_path(MemDevice* src_mem, MemDevice *tar_mem);
   /* stores the network topology as a json */
   void save_topology_json(const std::string& fname) const;
   void update_route();
@@ -431,6 +433,9 @@ public:
 public:
   std::map<size_t, uint64_t> logical_traffic_demand;
   std::map<size_t, uint64_t> physical_traffic_matrix;
+
+private:
+  NominalCommDevice* nomm_comm_devs_get(int node_id_src, int node_id_tar);
 };
 
 /**
